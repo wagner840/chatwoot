@@ -1,76 +1,82 @@
-version: '3.8' # Ou a versão mais recente suportada pelo seu Docker
+version: '3.8'
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16 # Mantendo a imagem pgvector que você escolheu
+    image: pgvector/pgvector:pg16
     restart: always
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file:
-      - .env # Carrega POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE daqui
+      - .env
     environment:
-      # Garante que o usuário e o banco de dados sejam criados com base no .env
-      # As variáveis POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE
-      # devem estar definidas no seu arquivo .env
-      POSTGRES_USER: ${POSTGRES_USERNAME} # Renomeando para corresponder ao .env
+      POSTGRES_USER: ${POSTGRES_USERNAME}
       POSTGRES_DB: ${POSTGRES_DATABASE}
+      # POSTGRES_PASSWORD será pego do .env
+    healthcheck: # Adicionado healthcheck para postgres
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USERNAME} -d ${POSTGRES_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
-    image: redis:7.0-alpine # Versão um pouco mais recente do Redis
+    image: redis:7.0-alpine
     restart: always
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     env_file:
-      - .env # Carrega REDIS_PASSWORD daqui
-    command: redis-server --requirepass ${REDIS_PASSWORD} # Usa a variável diretamente
+      - .env
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    healthcheck: # Adicionado healthcheck para redis
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # Serviço base para web e worker para evitar repetição
-  # Se o Dockerfile do fork estiver em um local diferente, ajuste o 'context'
-  app-base: &app-base
+  # Serviço base para web e worker
+  app-base: &app-base # Âncora sem o depends_on aqui
     build:
-      context: . # Assume que o Dockerfile está na raiz do repositório clonado
-      dockerfile: Dockerfile # Nome padrão, ajuste se o fork usar outro nome
-    image: chatwoot/app-fork-custom # Nome da imagem que será construída localmente
+      context: .
+      dockerfile: Dockerfile
+    image: chatwoot/app-fork-custom
     env_file:
       - .env
-    depends_on:
-      postgres:
-        condition: service_healthy # Espera o Postgres estar saudável
-      redis:
-        condition: service_started # Espera o Redis iniciar
     volumes:
-      - storage_data:/app/storage # Para uploads, se ACTIVE_STORAGE_SERVICE=local
-      # Se houver outros volumes de código necessários em produção, adicione aqui.
-      # Normalmente para 'build', o código já está na imagem.
+      - storage_data:/app/storage
 
   web:
     <<: *app-base # Herda de app-base
+    depends_on: # depends_on definido diretamente no serviço web
+      postgres:
+        condition: service_healthy # Espera o Postgres estar saudável
+      redis:
+        condition: service_healthy # Espera o Redis estar saudável
     ports:
       - "127.0.0.1:3000:3000"
-    # O entrypoint e command padrão do Dockerfile do Chatwoot devem cuidar de iniciar o Rails.
-    # Se o Dockerfile do fork tiver um entrypoint/cmd diferente ou se precisar de um comando específico:
-    # entrypoint: docker/entrypoints/rails.sh # Exemplo, verifique o fork
-    # command: bundle exec rails s -p 3000 -b '0.0.0.0'
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:3000/api/v1/ping || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s # Dá tempo para o app iniciar antes de começar os healthchecks
+      start_period: 60s
     restart: always
 
   worker:
     <<: *app-base # Herda de app-base
-    # O entrypoint e command padrão do Dockerfile do Chatwoot devem cuidar de iniciar o Sidekiq.
-    # Se o Dockerfile do fork tiver um entrypoint/cmd diferente ou se precisar de um comando específico:
-    # entrypoint: docker/entrypoints/worker.sh # Exemplo, verifique o fork
-    # command: bundle exec sidekiq -C config/sidekiq.yml
-    # Sem porta exposta, pois é um worker de background
+    depends_on: # depends_on definido diretamente no serviço worker
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Sem porta exposta para o worker
     healthcheck:
+      # O teste para sidekiqmon pode precisar do REDIS_URL completo.
+      # Se REDIS_URL no .env for redis://redis:6379, certifique-se que `redis` é o nome do serviço.
+      # Ajuste se o REDIS_URL no .env for diferente (ex: com senha)
+      # Se o REDIS_URL for redis://:${REDIS_PASSWORD}@redis:6379
       test: ["CMD-SHELL", "bundle exec sidekiqmon status -r ${REDIS_URL} || exit 1"]
       interval: 30s
       timeout: 10s
@@ -83,5 +89,5 @@ volumes:
     driver: local
   redis_data:
     driver: local
-  storage_data: # Para persistir uploads se ACTIVE_STORAGE_SERVICE=local
+  storage_data:
     driver: local
